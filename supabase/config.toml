@@ -1,0 +1,18 @@
+project_id = "xvyougrmtjjkhqzubrtr"
+
+[functions.mebundle-checkout]
+verify_jwt = false
+[functions.mebundle-payment]
+verify_jwt = false
+[functions.mebundle-payment-status]
+verify_jwt = false
+[functions.paystack-webhook]
+verify_jwt = false
+[functions.mebundle-track]
+verify_jwt = false
+[functions.mebundle-reseller]
+verify_jwt = false
+[functions.mebundle-admin]
+verify_jwt = false
+[functions.datamart-webhook]
+verify_jwt = false
