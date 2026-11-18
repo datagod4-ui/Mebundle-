@@ -1,9 +1,105 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-const json=(body:unknown,status=200)=>new Response(JSON.stringify(body),{status,headers:{"content-type":"application/json"}});
-async function validSignature(raw:string,signature:string,secret:string){const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(secret.trim()),{name:"HMAC",hash:"SHA-512"},false,["sign"]);const digest=new Uint8Array(await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(raw)));const expected=Array.from(digest,b=>b.toString(16).padStart(2,"0")).join("");if(signature.length!==expected.length)return false;let mismatch=0;for(let i=0;i<expected.length;i++)mismatch|=expected.charCodeAt(i)^signature.toLowerCase().charCodeAt(i);return mismatch===0;}
-async function hubnetRequest(baseUrl:string,apiKey:string,trackingCode:string,order:any){const [keyId,keySecret,...extra]=apiKey.split(".");if(!keyId||!keySecret||extra.length)throw new Error("Hubnet key must be key-id.secret format");const networkMap:Record<string,string>={mtn:"MTN Ghana Network",telecel:"Telecel Ghana Network",at:"AirtelTigo Ghana Network",airteltigo:"AirtelTigo Ghana Network"};const network=networkMap[String(order.network_code||"").toLowerCase()];if(!network)throw new Error("Unsupported network code: "+String(order.network_code));const number=String(order.recipient_phone||"").replace(/\s+/g,"");if(!/^0\d{9}$/.test(number))throw new Error("Recipient must be a local 10-digit Ghana number");const volume=String(order.data_amount_mb);if(!/^\d+(?:\.\d+)?$/.test(volume))throw new Error("Invalid bundle volume");const body={network,volume,number};const serialized=JSON.stringify(body);const path="/estore_customer_portal/api/customer/orders";const timestamp=String(Date.now());const hash=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(serialized))),b=>b.toString(16).padStart(2,"0")).join("");const canonical=timestamp+"\nPOST\n"+path+"\n"+hash;const hmacKey=await crypto.subtle.importKey("raw",new TextEncoder().encode(keySecret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);const sig=Array.from(new Uint8Array(await crypto.subtle.sign("HMAC",hmacKey,new TextEncoder().encode(canonical))),b=>b.toString(16).padStart(2,"0")).join("");const idempotency=("mebundle-"+trackingCode).replace(/[^A-Za-z0-9._:-]/g,"-").slice(0,128);if(idempotency.length<16)throw new Error("Tracking code too short for idempotency key");const response=await fetch(baseUrl.replace(/\/$/,"")+path,{method:"POST",headers:{Authorization:"HMAC "+keyId+":"+timestamp+":"+sig,Accept:"application/json","Content-Type":"application/json","Idempotency-Key":idempotency},body:serialized,signal:AbortSignal.timeout(30000)});const raw=await response.text();let payload:any;try{payload=JSON.parse(raw)}catch{payload={message:raw.slice(0,500)}}return{httpStatus:response.status,payload};}
-Deno.serve(async(req:Request)=>{if(req.method!=="POST")return json({error:"Method not allowed"},405);const paystackSecret=Deno.env.get("PAYSTACK_SECRET_KEY"),supabaseUrl=Deno.env.get("SUPABASE_URL"),serviceRole=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");if(!paystackSecret||!supabaseUrl||!serviceRole)return json({error:"Webhook is not configured"},503);const raw=await req.text();const signature=(req.headers.get("x-paystack-signature")||"").trim();if(!signature||!(await validSignature(raw,signature,paystackSecret)))return json({error:"Invalid Paystack signature"},401);let event:any;try{event=JSON.parse(raw)}catch{return json({error:"Invalid JSON"},400)}if(event.event!=="charge.success")return json({received:true,ignored:event.event||"unknown"});const reference=event.data?.reference;if(!reference)return json({error:"Missing transaction reference"},400);
-try{const verifyResponse=await fetch("https://api.paystack.co/transaction/verify/"+encodeURIComponent(reference),{headers:{Authorization:"Bearer "+paystackSecret,"Cache-Control":"no-cache"},signal:AbortSignal.timeout(20000)});const verified=await verifyResponse.json();if(!verifyResponse.ok||!verified.status||verified.data?.status!=="success")return json({error:"Paystack has not confirmed this payment"},409);const supabase=createClient(supabaseUrl,serviceRole,{auth:{persistSession:false,autoRefreshToken:false}});const {data:setting,error:settingError}=await supabase.from("site_settings").select("value").eq("key","internal_api_secret").eq("is_public",false).maybeSingle();if(settingError||!setting?.value?.secret)return json({error:"Payment confirmation is not configured"},503);const secret=setting.value.secret;const {data:order,error:paymentError}=await supabase.rpc("confirm_paystack_payment",{p_reference:reference,p_amount_minor:Number(verified.data.amount),p_currency:String(verified.data.currency||""),p_internal_secret:secret,p_provider_response:verified.data});if(paymentError){console.error("Payment confirmation failed",paymentError.message);return json({error:"Could not record payment confirmation"},500);}const {data:claim,error:claimError}=await supabase.rpc("claim_supplier_dispatch",{p_tracking_code:order.tracking_code,p_internal_secret:secret});if(claimError)return json({received:true,payment:"confirmed",supplier:"claim_error"},500);if(!claim?.claimed)return json({received:true,payment:"confirmed",supplier:"already_claimed",order});const apiKey=Deno.env.get("HUBNET_CUSTOMER_API_KEY"),storeId=Deno.env.get("HUBNET_STORE_ID"),origin=Deno.env.get("HUBNET_API_ORIGIN");if(!apiKey||!storeId||!origin){await supabase.rpc("record_supplier_submission",{p_tracking_code:order.tracking_code,p_internal_secret:secret,p_supplier_order_id:null,p_supplier_status:"failed",p_supplier_response:{message:"Hubnet secrets incomplete"}});return json({received:true,payment:"confirmed",supplier:"configuration_error"},503);}
-try{const result=await hubnetRequest(origin,apiKey,order.tracking_code,order);const payload=result.payload||{},accepted=result.httpStatus>=200&&result.httpStatus<300&&payload.success===true,data=payload.data||{},status=String(data.status||(accepted?"processing":"failed")).toLowerCase(),supplierId=data.order_id||data.reference||null;const {error:saveError}=await supabase.rpc("record_supplier_submission",{p_tracking_code:order.tracking_code,p_internal_secret:secret,p_supplier_order_id:supplierId?String(supplierId):null,p_supplier_status:accepted?status:"failed",p_supplier_response:{http_status:result.httpStatus,...payload}});if(saveError)return json({received:true,payment:"confirmed",supplier:"response_not_recorded"},500);if(!accepted){console.error("Hubnet rejected order",result.httpStatus,payload.message);return json({received:true,payment:"confirmed",supplier:"rejected",message:payload.message||"Hubnet rejected order"},502);}return json({received:true,payment:"confirmed",supplier:"submitted",supplier_status:status,supplier_order_id:supplierId,order});}catch(e){const message=e instanceof Error?e.message:"Unknown supplier error";await supabase.rpc("record_supplier_submission",{p_tracking_code:order.tracking_code,p_internal_secret:secret,p_supplier_order_id:null,p_supplier_status:"failed",p_supplier_response:{message,retry_safe:true}});console.error("Hubnet submission failed",message);return json({received:true,payment:"confirmed",supplier:"retry_required"},502);}}
-catch(error){console.error("Webhook processing error",error);return json({error:"Webhook processing failed"},500);}});
+
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, paystack-signature, x-paystack-signature",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Content-Type": "application/json",
+};
+const reply = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: cors });
+const toHex = (bytes: Uint8Array) =>
+  Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+
+async function verifyLegacy(raw: string, signature: string, secret: string) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret.trim()),
+    { name: "HMAC", hash: "SHA-512" }, false, ["sign"]);
+  const expected = toHex(new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(raw))));
+  if (signature.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ signature.toLowerCase().charCodeAt(i);
+  return diff === 0;
+}
+
+async function verifyModern(raw: string, header: string, secret: string) {
+  let timestamp = "";
+  const signatures: string[] = [];
+  for (const part of header.split(",")) {
+    const index = part.indexOf("=");
+    if (index < 0) continue;
+    const key = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (key === "t") timestamp = value;
+    if (key === "v1") {
+      const colon = value.indexOf(":");
+      if (colon > 0) signatures.push(value.slice(colon + 1));
+    }
+  }
+  if (!/^\d+$/.test(timestamp) || Math.abs(Math.floor(Date.now() / 1000) - Number(timestamp)) > 300) return false;
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret.trim()),
+    { name: "HMAC", hash: "SHA-512" }, false, ["sign"]);
+  const expected = toHex(new Uint8Array(await crypto.subtle.sign("HMAC", key,
+    new TextEncoder().encode(timestamp + "." + raw))));
+  return signatures.some((signature) => {
+    if (!/^[0-9a-f]{128}$/i.test(signature)) return false;
+    let diff = 0;
+    for (let i = 0; i < 128; i++) diff |= expected.charCodeAt(i) ^ signature.toLowerCase().charCodeAt(i);
+    return diff === 0;
+  });
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  if (req.method !== "POST") return reply({ error: "Method not allowed" }, 405);
+
+  const paystackSecret = (Deno.env.get("PAYSTACK_SECRET_KEY") || "").trim();
+  const webhookSecret = (Deno.env.get("PAYSTACK_WEBHOOK_SECRET") || "").trim();
+  const supabaseUrl = (Deno.env.get("SUPABASE_URL") || "").trim();
+  const serviceRole = (Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "").trim();
+  if (!paystackSecret || !supabaseUrl || !serviceRole) {
+    console.error("Paystack webhook is missing required server configuration");
+    return reply({ error: "Webhook is not configured" }, 503);
+  }
+
+  try {
+    const raw = await req.text();
+    let event: any;
+    try { event = JSON.parse(raw); } catch { return reply({ error: "Invalid JSON" }, 400); }
+    if (event?.event === "ping") return reply({ received: true, ping: true });
+
+    const modern = req.headers.get("paystack-signature") || "";
+    const legacy = (req.headers.get("x-paystack-signature") || "").trim();
+    let valid = false;
+    if (modern && webhookSecret) valid = await verifyModern(raw, modern, webhookSecret);
+    if (!valid && legacy) valid = await verifyLegacy(raw, legacy, paystackSecret);
+    if (!valid) return reply({ error: "Invalid Paystack signature" }, 401);
+
+    if (event?.event !== "charge.success") {
+      return reply({ received: true, ignored: event?.event || "unknown" });
+    }
+    const reference = String(event?.data?.reference || "").trim();
+    if (!reference || reference.length > 120) return reply({ error: "Missing or invalid payment reference" }, 400);
+
+    // The shared payment function verifies with Paystack and dispatches through
+    // the idempotent DataMart claim path. This avoids the old Hubnet dispatch.
+    const response = await fetch(supabaseUrl.replace(/\/$/, "") + "/functions/v1/mebundle-payment?action=verify", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + serviceRole,
+        "apikey": serviceRole,
+      },
+      body: JSON.stringify({ reference }),
+      signal: AbortSignal.timeout(50000),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      console.error("Shared payment verification failed", response.status, body?.error || "unknown");
+      return reply({ error: "Payment processing failed" }, 500);
+    }
+    return reply({ received: true, ...body });
+  } catch (error) {
+    console.error("Paystack webhook error:", error instanceof Error ? error.message : error);
+    return reply({ error: "Webhook processing failed" }, 500);
+  }
+});
