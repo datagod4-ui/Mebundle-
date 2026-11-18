@@ -1,0 +1,3 @@
+import {getSupabaseConfig} from "@/lib/supabase";
+export async function callEdge<T>(name:string,o:{method?:"GET"|"POST"|"PATCH";query?:string;body?:unknown;token?:string}={}):Promise<T>{const {url,key}=getSupabaseConfig();const method=o.method??(o.body?"POST":"GET");const r=await fetch(url+"/functions/v1/"+name+(o.query??""),{method,headers:{"Content-Type":"application/json",apikey:key,Authorization:"Bearer "+(o.token??key)},...(o.body?{body:JSON.stringify(o.body)}:{})});const p=await r.json().catch(()=>({}));if(!r.ok)throw new Error(p.error||p.message||"Something went wrong. Please try again.");return p as T;}
+export function formatGhs(v:number|string){return new Intl.NumberFormat("en-GH",{style:"currency",currency:"GHS",maximumFractionDigits:2}).format(Number(v));}
