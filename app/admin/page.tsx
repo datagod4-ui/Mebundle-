@@ -88,9 +88,16 @@ export default function AdminPage() {
     setForm((current) => ({ ...current, [key]: value }));
   }
 
-  async function requireAdminToken() {\n    const { data: { session } } = await getSupabase().auth.getSession();\n    if (!session) throw new Error("Your admin session has expired. Please sign in again.");\n    return session.access_token;\n  }\n\n  async function saveBundle(e: React.FormEvent<HTMLFormElement>) {
+  async function requireAdminToken() {
+    const { data: { session } } = await getSupabase().auth.getSession();
+    if (!session) throw new Error("Your admin session has expired. Please sign in again.");
+    return session.access_token;
+  }
+
+  async function saveBundle(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault(); setSaving(true); setError(""); setNotice("");
     try {
+      const token = await requireAdminToken();
       const payload = {
         ...form,
         data_amount_mb: Number(form.data_amount_mb),
@@ -99,7 +106,7 @@ export default function AdminPage() {
         display_order: Number(form.display_order || 0),
       };
       if (editingId) {
-        await callEdge("mebundle-admin", { method: "PATCH", query: "?action=bundle", body: { id: editingId, ...payload } });
+        await callEdge("mebundle-admin", { method: "PATCH", query: "?action=bundle", body: { id: editingId, ...payload }, token });
         setNotice("Bundle changes saved.");
       } else {
         await callEdge("mebundle-admin", { method: "POST", query: "?action=bundle", body: payload, token });
@@ -118,6 +125,7 @@ export default function AdminPage() {
       await callEdge("mebundle-admin", {
         method: "PATCH", query: "?action=bundle",
         body: { id: bundle.id, is_available: !bundle.is_available },
+        token: await requireAdminToken(),
       });
       setBundles((current) => current.map((item) => item.id === bundle.id ? { ...item, is_available: !item.is_available } : item));
       setNotice(bundle.is_available ? "Bundle is now hidden from customers." : "Bundle is now available to customers.");
