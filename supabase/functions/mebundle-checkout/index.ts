@@ -24,19 +24,25 @@ Deno.serve(async(req:Request)=>{
     customerPrice=Number(price.selling_price);resellerWholesale=Number(price.wholesale_price);
     if(!Number.isFinite(customerPrice)||customerPrice<resellerWholesale)return reply({error:"This reseller price is not valid."},409);
   }
+  const bundleAmountMinor=Math.round(customerPrice*100);
+  const paystackFeeRate=0.0195;
+  const totalAmountMinor=Math.ceil(bundleAmountMinor/(1-paystackFeeRate));
+  const processingFeeMinor=totalAmountMinor-bundleAmountMinor;
+  const checkoutTotal=totalAmountMinor/100;
+  const processingFee=processingFeeMinor/100;
   const reference="MB"+crypto.randomUUID().replaceAll("-","").toUpperCase();
   const orderRow:any={customer_name:customerName||null,customer_phone:customerPhone,recipient_phone:recipientPhone,network_code:networkCode,bundle_id:bundle.id,bundle_name:bundle.name,data_amount_mb:bundle.data_amount_mb,validity_label:bundle.validity_label,selling_price:customerPrice,payment_status:"pending",order_status:"awaiting_payment"};
   if(resellerProfile){orderRow.reseller_id=resellerProfile.id;orderRow.reseller_store_slug=resellerProfile.store_slug;orderRow.reseller_customer_price=customerPrice;orderRow.reseller_wholesale_price=resellerWholesale;orderRow.reseller_earning=Number((customerPrice-resellerWholesale!).toFixed(2));}
   const {data:order,error:orderError}=await db.from("orders").insert(orderRow).select("id,tracking_code").single();
   if(orderError||!order)throw new Error("Could not create your order. Please try again.");
-  const {error:paymentError}=await db.from("payments").insert({order_id:order.id,provider:"paystack",provider_reference:reference,amount:customerPrice,currency:"GHS",status:"pending"});
+  const {error:paymentError}=await db.from("payments").insert({order_id:order.id,provider:"paystack",provider_reference:reference,amount:checkoutTotal,currency:"GHS",status:"pending"});
   if(paymentError){await db.from("orders").delete().eq("id",order.id);throw new Error("Could not prepare payment. Please try again.");}
   const siteUrl="https://mebundle.vercel.app";
   const callbackUrl=siteUrl+"/payment/callback?reference="+encodeURIComponent(reference)+"&tracking_code="+encodeURIComponent(order.tracking_code);
-  const init=await fetch("https://api.paystack.co/transaction/initialize",{method:"POST",headers:{Authorization:"Bearer "+paystackSecret,"Content-Type":"application/json"},body:JSON.stringify({email:customerPhone+"@checkout.mebundle.gh",amount:Math.round(customerPrice*100),currency:"GHS",reference,callback_url:callbackUrl,metadata:{order_id:order.id,tracking_code:order.tracking_code,recipient_phone:recipientPhone,network:networkCode,bundle:bundle.name}})});
+  const init=await fetch("https://api.paystack.co/transaction/initialize",{method:"POST",headers:{Authorization:"Bearer "+paystackSecret,"Content-Type":"application/json"},body:JSON.stringify({email:customerPhone+"@checkout.mebundle.gh",amount:totalAmountMinor,currency:"GHS",reference,callback_url:callbackUrl,metadata:{order_id:order.id,tracking_code:order.tracking_code,recipient_phone:recipientPhone,network:networkCode,bundle:bundle.name,bundle_amount:customerPrice,processing_fee:processingFee,processing_fee_rate:paystackFeeRate}})});
   const payload=await init.json();
   if(!init.ok||!payload.status||!payload.data?.authorization_url){await db.from("payments").update({status:"failed",provider_response:payload}).eq("provider_reference",reference);await db.from("orders").update({payment_status:"failed",order_status:"failed",failure_reason:"Payment initialization failed"}).eq("id",order.id);return reply({error:payload.message||"Unable to start payment. Please try again."},502);}
   await db.from("payments").update({checkout_url:payload.data.authorization_url,provider_response:{initialization:{status:true}}}).eq("provider_reference",reference);
-  return reply({authorization_url:payload.data.authorization_url,reference,tracking_code:order.tracking_code,amount:customerPrice});
+  return reply({authorization_url:payload.data.authorization_url,reference,tracking_code:order.tracking_code,bundle_amount:customerPrice,processing_fee:processingFee,total_amount:checkoutTotal,processing_fee_rate:paystackFeeRate});
  }catch(e){console.error("Checkout error",e);return reply({error:e instanceof Error?e.message:"Checkout could not be completed."},500);}
 });
