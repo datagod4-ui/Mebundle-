@@ -145,7 +145,7 @@ export default function AdminPage() {
             <span className="text-xl font-black">me<span className="text-[#21845b]">bundle</span></span>
             <span className="rounded-full bg-[#e9f5ec] px-2 py-1 text-[10px] font-extrabold uppercase text-[#28744f]">Admin</span>
           </Link>
-          <button onClick={signOut} className="btn-soft !py-2 text-xs"><LogOut size={14} /> Sign out</button>
+          <div className="flex items-center gap-2"><Link href="/admin/resellers" className="btn-soft !py-2 text-xs">Resellers & payouts</Link><button onClick={signOut} className="btn-soft !py-2 text-xs"><LogOut size={14} /> Sign out</button></div>
         </nav>
       </header>
 
