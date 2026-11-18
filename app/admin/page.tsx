@@ -88,7 +88,7 @@ export default function AdminPage() {
     setForm((current) => ({ ...current, [key]: value }));
   }
 
-  async function saveBundle(e: React.FormEvent<HTMLFormElement>) {
+  async function requireAdminToken() {\n    const { data: { session } } = await getSupabase().auth.getSession();\n    if (!session) throw new Error("Your admin session has expired. Please sign in again.");\n    return session.access_token;\n  }\n\n  async function saveBundle(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault(); setSaving(true); setError(""); setNotice("");
     try {
       const payload = {
@@ -102,7 +102,7 @@ export default function AdminPage() {
         await callEdge("mebundle-admin", { method: "PATCH", query: "?action=bundle", body: { id: editingId, ...payload } });
         setNotice("Bundle changes saved.");
       } else {
-        await callEdge("mebundle-admin", { method: "POST", query: "?action=bundle", body: payload });
+        await callEdge("mebundle-admin", { method: "POST", query: "?action=bundle", body: payload, token });
         setNotice("New bundle added to the catalogue.");
       }
       setFormOpen(false); setEditingId(null); setForm(emptyForm);
