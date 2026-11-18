@@ -30,7 +30,7 @@ Deno.serve(async (req: Request) => {
 
   // Public host resolver used by the Next.js proxy for connected custom storefront domains.
   if (req.method === "GET" && action === "resolve-domain") {
-    const host = (requestUrl.searchParams.get("host") || "").toLowerCase().replace(/:\\d+$/, "");
+    const host = (requestUrl.searchParams.get("host") || "").toLowerCase().replace(/:\d+$/, "");
     if (!host || host.length > 253) return reply({ error: "Storefront not found" }, 404);
     const { data: domainRow, error: domainError } = await db.from("reseller_custom_domains")
       .select("domain,reseller_id,reseller_profiles!inner(store_slug,status)")
@@ -137,8 +137,8 @@ Deno.serve(async (req: Request) => {
 
     if (req.method === "POST" && action === "domain-request") {
       const body = await req.json();
-      const domain = String(body.domain || "").trim().toLowerCase().replace(/^https?:\\/\\//, "").replace(/\\/$/, "");
-      if (!/^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$/.test(domain) ||
+      const domain = String(body.domain || "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/$/, "");
+      if (!/^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain) ||
           domain === "mebundle.vercel.app" || domain.endsWith(".vercel.app")) {
         return reply({ error: "Enter a valid domain name, such as shop.example.com. Do not include https:// or a path." }, 400);
       }
@@ -210,8 +210,9 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    if (req.method === "DELETE" && action === "domain-remove") {
-      const id = requestUrl.searchParams.get("id") || "";
+    if (req.method === "POST" && action === "domain-remove") {
+      const removeBody = await req.json();
+      const id = String(removeBody.id || "");
       const { data: record, error: findError } = await db.from("reseller_custom_domains")
         .select("id,domain,status").eq("id", id).eq("reseller_id", user.id).maybeSingle();
       if (findError) throw findError;
